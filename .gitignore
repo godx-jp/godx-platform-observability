@@ -1,0 +1,12 @@
+.env
+.env.local
+.DS_Store
+
+# Volume data (mount-based dev)
+data/
+*.tmp
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp

@@ -1,0 +1,8 @@
+# Drop a copy of this file into ../../config/prometheus/scrape.d/<project>.yml
+# Prometheus picks it up via file_sd; reload with `make reload-prometheus`.
+
+- targets:
+    - 'my-app:8080'
+  labels:
+    service: my-app
+    project: my-project

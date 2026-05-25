@@ -1,0 +1,37 @@
+# Example: consumer project imports the observability stack via compose `include`.
+# Requires Docker Compose v2.20+.
+#
+# Run from this directory:
+#   cp .env.example .env
+#   docker compose up -d
+#
+# Apps emit traces/metrics/logs to otel-collector:4317 — no other plumbing needed.
+
+name: my-project
+
+include:
+  - path: ../../compose/docker-compose.yml
+    env_file: ../../.env
+
+services:
+  my-app:
+    image: ghcr.io/example/my-app:latest
+    container_name: my-app
+    restart: unless-stopped
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      OTEL_RESOURCE_ATTRIBUTES: service.name=my-app,service.version=1.0.0,deployment.environment=${DEPLOYMENT_ENV:-dev}
+    # Opt in to Promtail log collection (Docker label-based filter).
+    labels:
+      observability.collect: "true"
+      observability.service: "my-app"
+      observability.env: "${DEPLOYMENT_ENV:-dev}"
+    depends_on:
+      - otel-collector
+    networks:
+      - default
+
+networks:
+  default:
+    name: ${OBS_NETWORK:-observability}

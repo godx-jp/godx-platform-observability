@@ -1,0 +1,25 @@
+# Example: observability stack already running in network `observability`
+# (started separately via `make up` in the observability repo).
+# Consumer just attaches to it as an external network.
+
+name: my-project
+
+services:
+  my-app:
+    image: ghcr.io/example/my-app:latest
+    container_name: my-app
+    restart: unless-stopped
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_RESOURCE_ATTRIBUTES: service.name=my-app,service.version=1.0.0,deployment.environment=${DEPLOYMENT_ENV:-dev}
+    labels:
+      observability.collect: "true"
+      observability.service: "my-app"
+      observability.env: "${DEPLOYMENT_ENV:-dev}"
+    networks:
+      - observability
+
+networks:
+  observability:
+    external: true
+    name: ${OBS_NETWORK:-observability}

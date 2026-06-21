@@ -49,6 +49,20 @@ wait_http "http://localhost:${PROM_HOST_PORT:-9090}/-/healthy"     60 "Prometheu
 # Collector / Loki / Tempo aren't host-exposed → probe from inside the network.
 docker_exec_curl() { docker run --rm --network "${OBS_NETWORK:-observability}" curlimages/curl:8.10.1 "$@"; }
 
+# Poll an in-network HTTP endpoint until it returns 2xx (backends need time to
+# become ready on a cold CI runner — single-shot checks are racy).
+wait_exec_http() { # label url timeout
+  local label="$1" url="$2" timeout="${3:-90}"
+  local deadline=$(( SECONDS + timeout ))
+  while (( SECONDS < deadline )); do
+    if docker_exec_curl -fsS -o /dev/null -m 5 "$url" >/dev/null 2>&1; then
+      pass "$label"; return 0
+    fi
+    sleep 2
+  done
+  fail "$label (not ready after ${timeout}s: $url)"; return 1
+}
+
 if docker_exec_curl -fsS -o /dev/null -m 5 http://otel-collector:13133/ >/dev/null 2>&1; then
   pass "OTel Collector health"
 else
@@ -63,8 +77,8 @@ else
   [[ $ok -eq 1 ]] && pass "OTel Collector health (retry)" || fail "OTel Collector health"
 fi
 
-assert_cmd "Loki ready"  docker_exec_curl -fsS -m 5 http://loki:3100/ready
-assert_cmd "Tempo ready" docker_exec_curl -fsS -m 5 http://tempo:3200/ready
+wait_exec_http "Loki ready"  http://loki:3100/ready  90
+wait_exec_http "Tempo ready" http://tempo:3200/ready 90
 
 # ─── 3. Push synthetic telemetry via OpenTelemetry telemetrygen ─────────────
 step "Pushing synthetic traces via telemetrygen"
@@ -93,9 +107,15 @@ done
 [[ $ok -eq 1 ]] && pass "Tempo received traces for $SVC" || fail "Tempo did not see traces for $SVC"
 
 # ─── 4. Verify Prometheus is scraping OTel Collector self-metrics ───────────
-step "Verifying Prometheus scrape of otel-collector"
-body=$(docker_exec_curl -fsS -m 5 "http://prometheus:9090/api/v1/query?query=up%7Bjob%3D%22otel-collector%22%7D" || echo '')
-assert_contains "prometheus scrape otel-collector" "$body" '"value":'
+step "Verifying Prometheus scrape of otel-collector (allow up to 60s)"
+ok=0
+for _ in $(seq 1 30); do
+  body=$(docker_exec_curl -fsS -m 5 "http://prometheus:9090/api/v1/query?query=up%7Bjob%3D%22otel-collector%22%7D" 2>/dev/null || echo '')
+  if [[ "$body" == *'"value":'* ]]; then ok=1; break; fi
+  sleep 2
+done
+[[ $ok -eq 1 ]] && pass "prometheus scrape otel-collector" \
+  || fail "prometheus scrape otel-collector (no value after 60s)"
 
 # ─── 5. Verify Grafana provisioned datasources ──────────────────────────────
 step "Verifying Grafana datasource provisioning"

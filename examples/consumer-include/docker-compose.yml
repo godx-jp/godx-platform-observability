@@ -32,6 +32,7 @@ services:
     networks:
       - default
 
-networks:
-  default:
-    name: ${OBS_NETWORK:-observability}
+# The `default` network is provided by the included observability stack
+# (compose/docker-compose.yml). Re-declaring it here conflicts with the imported
+# resource under Compose v2 (`networks.default conflicts with imported resource`),
+# so we attach to it directly instead.

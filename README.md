@@ -97,15 +97,60 @@ networks:
 git submodule add https://github.com/your-org/godx-platform-observability vendor/observability
 ```
 
-### 3. Production (Kubernetes)
+### 3. Prebuilt images from GHCR (no checkout — recommended for production)
 
-Use upstream Helm charts; this repo ships **values overlays** under `helm/`. See [helm/README.md](./helm/README.md).
+Each component is published to GitHub Container Registry with its config **baked in**, so you can run
+the whole stack without cloning this repo or mounting any config:
+
+```bash
+OBS_VERSION=1.0.0 docker compose -f compose/docker-compose.ghcr.yml up -d
+# Grafana → :3000 · OTLP → :4317 (gRPC) / :4318 (HTTP)
+```
+
+Images (set each package to Public once after the first publish):
+
+```
+ghcr.io/godx-jp/godx-platform-observability/otel-collector:<ver>
+ghcr.io/godx-jp/godx-platform-observability/loki:<ver>
+ghcr.io/godx-jp/godx-platform-observability/promtail:<ver>
+ghcr.io/godx-jp/godx-platform-observability/prometheus:<ver>
+ghcr.io/godx-jp/godx-platform-observability/tempo:<ver>
+ghcr.io/godx-jp/godx-platform-observability/grafana:<ver>
+```
+
+Reference these images directly from your own compose/Helm — no repo files needed. Images are
+published by [`.github/workflows/publish.yml`](./.github/workflows/publish.yml) on every `vX.Y.Z` tag.
+
+### 4. Production (Kubernetes)
+
+The compose stacks are single-node. For **horizontally scalable production** this
+repo ships an **umbrella Helm chart** under [`helm/`](./helm/) — pinned upstream
+charts composed as values overlays (no forks):
+
+- **Loki** SimpleScalable + object storage, **Mimir distributed** (replaces the
+  single Prometheus for scale + HA), **Tempo distributed**, **Grafana** HA with
+  external Postgres, and the **OTel Collector** as an autoscaled gateway.
+- Cloud-agnostic object storage: `values-s3.yaml` / `values-gcs.yaml` /
+  `values-azure.yaml` / `values-minio.yaml`. Production sizing in
+  `values-production.yaml`. All secrets via Kubernetes Secrets.
+
+```bash
+helm repo add grafana https://grafana.github.io/helm-charts
+helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+helm dependency build ./helm
+helm upgrade --install obs ./helm -n observability \
+  -f helm/values.yaml -f helm/values-s3.yaml -f helm/values-production.yaml
+```
+
+Full instructions: [helm/README.md](./helm/README.md). Why it scales out the way
+it does: [docs/SCALING.md](./docs/SCALING.md).
 
 ## Two flavours
 
 | Flavour | File | When |
 |---------|------|------|
-| **Multi-container (default)** | `compose/docker-compose.yml` | Mirrors prod topology — separate Loki, Prom, Tempo, Grafana, OTel Collector. Recommended. |
+| **From GHCR (baked config)** | `compose/docker-compose.ghcr.yml` | Pull prebuilt images — no checkout, no config mounts. Recommended for production / other projects. |
+| **Multi-container (source)** | `compose/docker-compose.yml` | Mirrors prod topology from local config — separate Loki, Prom, Tempo, Grafana, OTel Collector. For developing this repo. |
 | **All-in-one** | `compose/docker-compose.otel-lgtm.yml` | Single upstream `grafana/otel-lgtm` image. Lighter on the laptop. Dev/CI/demo only. |
 
 ## Repository layout

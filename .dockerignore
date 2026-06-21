@@ -1,0 +1,19 @@
+# Keep the image build context lean — only config/ and dashboards/ are baked in.
+.git
+.github
+.gitignore
+.dockerignore
+docs
+examples
+helm
+tests
+Makefile
+README.md
+CHANGELOG.md
+LICENSE
+.env
+.env.*
+!.env.example
+.DS_Store
+.vscode
+.idea

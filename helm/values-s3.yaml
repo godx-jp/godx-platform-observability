@@ -1,0 +1,101 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Object-storage overlay: AWS S3 (or any S3-compatible: Cloudflare R2, Wasabi,
+# Ceph RGW, etc.). Layer AFTER values.yaml.
+#
+#   helm upgrade --install obs ./helm -n observability \
+#     -f helm/values.yaml -f helm/values-s3.yaml [-f helm/values-production.yaml]
+#
+# Credentials: DO NOT inline keys. Prefer IRSA / Workload Identity (leave the
+# access_key_id / secret_access_key blank and the AWS SDK picks up the pod's
+# IAM role). If you must use static keys, create a Secret and reference it (see
+# the commented `extraEnv*` blocks + helm/README.md → "Object-storage secret").
+#
+# Set every CHANGE-ME below. Buckets must be pre-created (one per signal).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Tunables you must set ────────────────────────────────────────────────────
+# region:        us-east-1
+# loki bucket:   obs-loki-chunks
+# mimir bucket:  obs-mimir-blocks   (also -ruler / -alertmanager if used)
+# tempo bucket:  obs-tempo-traces
+
+# =============================================================================
+# LOKI
+# =============================================================================
+loki:
+  loki:
+    storage:
+      type: s3
+      bucketNames:
+        chunks: obs-loki-chunks       # CHANGE-ME
+        ruler: obs-loki-ruler         # CHANGE-ME
+        admin: obs-loki-admin         # CHANGE-ME
+      s3:
+        region: us-east-1             # CHANGE-ME
+        # endpoint: ""                # set for S3-compatible (R2/MinIO/Ceph); omit for AWS
+        # s3ForcePathStyle: false     # true for most S3-compatible providers
+        # Leave keys blank to use IRSA / instance profile (RECOMMENDED).
+        # accessKeyId: ""
+        # secretAccessKey: ""
+    schemaConfig:
+      configs:
+        - from: "2024-01-01"
+          store: tsdb
+          object_store: s3
+          schema: v13
+          index:
+            prefix: index_
+            period: 24h
+    compactor:
+      delete_request_store: s3
+  # Static keys (only if NOT using IRSA): create Secret `loki-objstore` with
+  # keys access_key_id / secret_access_key, then uncomment:
+  # write:   { extraEnvFrom: &s3env [{ secretRef: { name: loki-objstore } }] }
+  # read:    { extraEnvFrom: *s3env }
+  # backend: { extraEnvFrom: *s3env }
+
+# =============================================================================
+# MIMIR  (common.storage applies to blocks + ruler + alertmanager)
+# =============================================================================
+mimir:
+  mimir:
+    structuredConfig:
+      common:
+        storage:
+          backend: s3
+          s3:
+            region: us-east-1              # CHANGE-ME
+            bucket_name: obs-mimir-blocks  # CHANGE-ME (per-component override below)
+            # endpoint: s3.us-east-1.amazonaws.com
+            # For static creds, inject via env (see extraEnvFrom) and reference:
+            # access_key_id: ${AWS_ACCESS_KEY_ID}
+            # secret_access_key: ${AWS_SECRET_ACCESS_KEY}
+      blocks_storage:
+        s3:
+          bucket_name: obs-mimir-blocks    # CHANGE-ME
+      ruler_storage:
+        s3:
+          bucket_name: obs-mimir-ruler     # CHANGE-ME
+  # Static keys (if NOT using IRSA): create Secret `mimir-objstore` (keys
+  # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY) then:
+  # global:
+  #   extraEnvFrom:
+  #     - secretRef: { name: mimir-objstore }
+
+# =============================================================================
+# TEMPO
+# =============================================================================
+tempo:
+  storage:
+    trace:
+      backend: s3
+      s3:
+        bucket: obs-tempo-traces          # CHANGE-ME
+        region: us-east-1                 # CHANGE-ME
+        # endpoint: s3.us-east-1.amazonaws.com
+        # For static creds use env interpolation + extraEnvFrom on the components:
+        # access_key: ${S3_ACCESS_KEY}
+        # secret_key: ${S3_SECRET_KEY}
+  # Static keys (if NOT using IRSA): create Secret `tempo-objstore` then set
+  # `tempo.distributor.extraEnvFrom`, `ingester.extraEnvFrom`,
+  # `compactor.extraEnvFrom`, `querier.extraEnvFrom` = [{ secretRef: { name: tempo-objstore } }].

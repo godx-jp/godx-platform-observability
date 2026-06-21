@@ -1,0 +1,170 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Production sizing overlay. Realistic replica counts, retention, resources, and
+# HA hardening for a non-trivial production load (order of ~hundreds of GB/day
+# logs, millions of active series, sustained trace ingest). Tune to your numbers
+# and SLOs — this is a sane starting point, not a universal answer.
+#
+# Layer LAST, after values.yaml and ONE object-storage overlay:
+#   helm upgrade --install obs ./helm -n observability \
+#     -f helm/values.yaml -f helm/values-s3.yaml -f helm/values-production.yaml
+#
+# Capacity-plan against the upstream sizing guides:
+#   Loki   : https://grafana.com/docs/loki/latest/setup/size/
+#   Mimir  : https://grafana.com/docs/mimir/latest/manage/run-production-environment/planning-capacity/
+#   Tempo  : https://grafana.com/docs/tempo/latest/operations/deployment/
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Spread replicas across nodes/AZs everywhere possible.
+_anti_affinity_hostname: &antiAffinityHostname
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          topologyKey: kubernetes.io/hostname
+
+# =============================================================================
+# LOKI — SimpleScalable, scaled. (Move to deploymentMode: Distributed beyond ~1TB/day.)
+# =============================================================================
+loki:
+  loki:
+    # RF3 across the 3 write replicas below — an ingester loss never drops un-flushed logs.
+    commonConfig:
+      replication_factor: 3
+    limits_config:
+      retention_period: 720h        # 30d
+      max_query_lookback: 720h
+      ingestion_rate_mb: 64
+      ingestion_burst_size_mb: 128
+      per_stream_rate_limit: 8MB
+      per_stream_rate_limit_burst: 24MB
+      max_global_streams_per_user: 50000
+  write:
+    replicas: 3
+    podDisruptionBudget: { maxUnavailable: 1 }
+    resources:
+      requests: { cpu: "1", memory: "2Gi" }
+      limits:   { memory: "4Gi" }
+  read:
+    replicas: 3
+    autoscaling:
+      enabled: true
+      minReplicas: 3
+      maxReplicas: 9
+      targetCPUUtilizationPercentage: 70
+    resources:
+      requests: { cpu: "1", memory: "2Gi" }
+      limits:   { memory: "4Gi" }
+  backend:
+    replicas: 3
+    persistence: { size: 50Gi }
+    resources:
+      requests: { cpu: "500m", memory: "1Gi" }
+      limits:   { memory: "2Gi" }
+  gateway:
+    replicas: 3
+  chunksCache:
+    enabled: true
+    allocatedMemory: 4096
+  resultsCache:
+    enabled: true
+
+# =============================================================================
+# MIMIR — distributed, scaled. RF=3, zone-aware ingesters for AZ resilience.
+# =============================================================================
+mimir:
+  mimir:
+    structuredConfig:
+      limits:
+        compactor_blocks_retention_period: 90d   # 90d metrics retention
+        max_global_series_per_user: 5000000
+        ingestion_rate: 250000
+        ingestion_burst_size: 500000
+        out_of_order_time_window: 10m
+  distributor:
+    replicas: 3
+    resources:
+      requests: { cpu: "1", memory: "1Gi" }
+      limits:   { memory: "2Gi" }
+  ingester:
+    replicas: 6
+    zoneAwareReplication:
+      enabled: true
+    persistentVolume: { size: 50Gi }
+    resources:
+      requests: { cpu: "2", memory: "8Gi" }
+      limits:   { memory: "12Gi" }
+  store_gateway:
+    replicas: 3
+    zoneAwareReplication:
+      enabled: true
+    persistentVolume: { size: 50Gi }
+  compactor:
+    replicas: 2
+    persistentVolume: { size: 50Gi }
+    resources:
+      requests: { cpu: "1", memory: "2Gi" }
+      limits:   { memory: "6Gi" }
+  querier:
+    replicas: 3
+    kedaAutoscaling:
+      enabled: false
+  query_frontend:
+    replicas: 2
+  query_scheduler:
+    replicas: 2
+  gateway:
+    replicas: 3
+  ruler:
+    replicas: 2
+
+# =============================================================================
+# TEMPO — distributed, scaled. RF=3.
+# =============================================================================
+tempo:
+  distributor:
+    replicas: 3
+    resources:
+      requests: { cpu: "1", memory: "1Gi" }
+      limits:   { memory: "2Gi" }
+  ingester:
+    replicas: 3
+    persistence: { enabled: true, size: 50Gi }
+    resources:
+      requests: { cpu: "1", memory: "2Gi" }
+      limits:   { memory: "4Gi" }
+  querier:
+    replicas: 3
+  queryFrontend:
+    replicas: 2
+  compactor:
+    replicas: 2
+    config:
+      compaction:
+        block_retention: 336h        # 14d traces in prod
+  metricsGenerator:
+    replicas: 2
+  gateway:
+    replicas: 3
+
+# =============================================================================
+# GRAFANA — more replicas; resources bumped. (External Postgres set in values.yaml.)
+# =============================================================================
+grafana:
+  replicas: 3
+  resources:
+    requests: { cpu: "500m", memory: "512Mi" }
+    limits:   { memory: "1Gi" }
+
+# =============================================================================
+# OTEL COLLECTOR — wider HPA band; bigger requests.
+# =============================================================================
+otelCollector:
+  replicaCount: 3
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 20
+    targetCPUUtilizationPercentage: 70
+  resources:
+    requests: { cpu: "500m", memory: "512Mi" }
+    limits:   { memory: "2Gi" }

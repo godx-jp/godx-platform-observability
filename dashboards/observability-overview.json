@@ -1,0 +1,76 @@
+{
+  "uid": "obs-overview",
+  "title": "Observability Overview (LGTM)",
+  "tags": ["godx", "observability", "lgtm"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "service",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": "label_values(traces_service_graph_request_total, server)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true
+      }
+    ]
+  },
+  "panels": [
+    {
+      "title": "Span rate (Tempo metrics-generator → Mimir)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum by (span_name) (rate(traces_spanmetrics_calls_total[5m]))",
+          "legendFormat": "{{span_name}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Span latency p95 (s)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, span_name) (rate(traces_spanmetrics_latency_bucket[5m])))",
+          "legendFormat": "{{span_name}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Log volume by level",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        {
+          "expr": "sum by (level) (count_over_time({service_name=~\".+\"} | logfmt [1m]))",
+          "legendFormat": "{{level}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Recent errors",
+      "type": "logs",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        {
+          "expr": "{service_name=~\".+\"} | json | level=~\"error|ERROR|fatal|FATAL\"",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

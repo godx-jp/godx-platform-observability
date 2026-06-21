@@ -64,6 +64,33 @@ validate: ## Validate compose + config
 	$(DC) config -q && echo "compose OK"
 	$(COMPOSE) --env-file $(ENV_FILE) -f compose/docker-compose.otel-lgtm.yml config -q && echo "compose (otel-lgtm) OK"
 
+##@ Helm (production / Kubernetes)
+
+HELM        ?= helm
+HELM_CHART  ?= helm
+HELM_RELEASE ?= obs
+HELM_NS     ?= observability
+# Storage overlay: s3 | gcs | azure | minio
+HELM_STORAGE ?= s3
+HELM_VALUES := -f $(HELM_CHART)/values.yaml -f $(HELM_CHART)/values-$(HELM_STORAGE).yaml -f $(HELM_CHART)/values-production.yaml
+
+helm-repos: ## Add upstream chart repos (grafana, open-telemetry)
+	$(HELM) repo add grafana https://grafana.github.io/helm-charts
+	$(HELM) repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+	$(HELM) repo update
+
+helm-deps: ## Resolve pinned chart dependencies into helm/charts/
+	$(HELM) dependency build $(HELM_CHART)
+
+helm-lint: ## Lint the umbrella chart with the production overlay set
+	$(HELM) lint $(HELM_CHART) $(HELM_VALUES)
+
+helm-template: ## Render manifests (dry-run) with the production overlay set
+	$(HELM) template $(HELM_RELEASE) $(HELM_CHART) -n $(HELM_NS) $(HELM_VALUES)
+
+helm-install: ## Install/upgrade the stack (set HELM_STORAGE=s3|gcs|azure|minio)
+	$(HELM) upgrade --install $(HELM_RELEASE) $(HELM_CHART) -n $(HELM_NS) --create-namespace $(HELM_VALUES) --wait --timeout 15m
+
 ##@ Test
 
 test: test-unit test-smoke ## Run unit + smoke tests
@@ -77,4 +104,5 @@ test-smoke: ## End-to-end smoke: bring stack up, push telemetry, verify ingestio
 test-smoke-down: ## Smoke + tear down after (KEEP=0)
 	KEEP=0 ./tests/smoke.sh
 
-.PHONY: help version up up-lite down down-volumes restart ps logs reload-prometheus health validate test test-unit test-smoke test-smoke-down
+.PHONY: help version up up-lite down down-volumes restart ps logs reload-prometheus health validate test test-unit test-smoke test-smoke-down \
+	helm-repos helm-deps helm-lint helm-template helm-install

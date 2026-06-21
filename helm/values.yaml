@@ -1,0 +1,548 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# godx-platform-observability — base values (the "wiring" layer)
+#
+# This file makes the five upstream charts work together as ONE plane:
+#   - in-cluster service names / gateway URLs so each component finds the others
+#   - the OTel Collector pipelines that fan OTLP → Loki / Mimir / Tempo
+#   - Grafana datasources pre-correlated (logs ↔ traces ↔ metrics)
+#   - HA defaults (replicas, PDB, anti-affinity, resource requests/limits, HPA)
+#
+# It contains NO secrets and NO object-storage backend. Layer exactly ONE of:
+#   values-s3.yaml | values-gcs.yaml | values-azure.yaml | values-minio.yaml
+# on top (they fill in the storage blocks), then optionally values-production.yaml
+# for prod-sized replicas/retention/resources.
+#
+# Keys are namespaced by the dependency alias in Chart.yaml:
+#   loki.*  mimir.*  tempo.*  grafana.*  otelCollector.*
+#
+# Service-name assumptions below use the convention `<release>-<chart>`. They are
+# written for a release named "obs" in namespace "observability". If you install
+# under a different release name, override the URLs in grafana.datasources and
+# otelCollector.config, OR install with --name-template / set the *.fullnameOverride
+# keys provided below so names stay stable.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Stable in-cluster names independent of release name. Datasource/collector URLs
+# below reference these, so they are correct regardless of `helm install <name>`.
+nameOverrides:
+  loki: obs-loki
+  mimirGateway: obs-mimir-gateway
+  tempoGateway: obs-tempo-gateway
+  tempoDistributor: obs-tempo-distributor
+
+# =============================================================================
+# LOKI — logs, SimpleScalable (read / write / backend), object storage required.
+# https://grafana.github.io/helm-charts  (chart: loki 6.55.0)
+# =============================================================================
+loki:
+  enabled: true
+  fullnameOverride: obs-loki
+
+  deploymentMode: SimpleScalable
+
+  loki:
+    auth_enabled: false        # single-tenant plane; front with auth proxy / Ingress
+    # Durability: replication_factor MUST be ≤ write.replicas. Base is a dev/staging
+    # baseline (2 writes → RF1, no redundancy). values-production.yaml raises this to
+    # 3 (with ≥3 write replicas) so a lost ingester never loses un-flushed logs.
+    commonConfig:
+      replication_factor: 1
+    server:
+      http_listen_port: 3100
+      grpc_listen_port: 9095
+    # Schema: TSDB v13 (matches dev config/loki/loki-config.yml).
+    schemaConfig:
+      configs:
+        - from: "2024-01-01"
+          store: tsdb
+          object_store: s3      # overridden per-backend in values-<backend>.yaml
+          schema: v13
+          index:
+            prefix: index_
+            period: 24h
+    limits_config:
+      retention_period: 720h    # 30d — matches LOKI_RETENTION dev default
+      max_query_lookback: 720h
+      reject_old_samples: true
+      reject_old_samples_max_age: 168h
+      ingestion_rate_mb: 16
+      ingestion_burst_size_mb: 32
+      allow_structured_metadata: true
+      volume_enabled: true
+    # Compactor owns retention enforcement in object storage.
+    compactor:
+      retention_enabled: true
+      delete_request_store: s3  # overridden per-backend
+      compaction_interval: 10m
+      retention_delete_delay: 2h
+    # storage{} block (type + bucketNames + provider creds) is supplied by the
+    # object-storage overlay (values-s3.yaml / -gcs / -azure / -minio).
+    pattern_ingester:
+      enabled: false
+    querier:
+      max_concurrent: 4
+
+  # Disable the chart's bundled single-node MinIO — we use a real object store.
+  # The values-minio.yaml overlay re-enables a HA MinIO StatefulSet.
+  minio:
+    enabled: false
+
+  # SimpleScalable targets. Replica counts here are conservative dev/staging
+  # baselines; values-production.yaml raises them.
+  write:
+    replicas: 2
+    podDisruptionBudget:
+      maxUnavailable: 1
+    resources:
+      requests: { cpu: "500m", memory: "1Gi" }
+      limits:   { memory: "2Gi" }
+  read:
+    replicas: 2
+    podDisruptionBudget:
+      maxUnavailable: 1
+    resources:
+      requests: { cpu: "500m", memory: "1Gi" }
+      limits:   { memory: "2Gi" }
+  backend:
+    replicas: 2
+    podDisruptionBudget:
+      maxUnavailable: 1
+    persistence:
+      size: 10Gi
+    resources:
+      requests: { cpu: "250m", memory: "512Mi" }
+      limits:   { memory: "1Gi" }
+
+  # Gateway (nginx) — single read/write entrypoint at :80 path /loki/api/v1/...
+  gateway:
+    enabled: true
+    replicas: 2
+
+  # Run as non-root (chart default sets fsGroup; make it explicit).
+  loki_canary:
+    enabled: false
+  test:
+    enabled: false
+
+# =============================================================================
+# MIMIR — metrics (REPLACES single Prometheus for horizontal scale).
+# Metrics arrive via remote_write into the mimir gateway (OTel Collector writes
+# OTLP→PRW here; apps/Prometheus agents can also remote_write directly).
+# https://grafana.github.io/helm-charts  (chart: mimir-distributed 6.0.6)
+# =============================================================================
+mimir:
+  enabled: true
+
+  # Disable bundled single-node MinIO — object storage comes from the overlay.
+  minio:
+    enabled: false
+
+  mimir:
+    structuredConfig:
+      # Retention ~ 30d for metrics (compactor blocks retention).
+      limits:
+        compactor_blocks_retention_period: 30d
+        # Allow OTLP/PRW pushes with out-of-order samples (OTel batching).
+        out_of_order_time_window: 5m
+      # common.storage{} (backend + bucket) is filled by the overlay.
+
+  # Gateway is the single ingest/query entrypoint (auth-multitenancy off by
+  # default; this plane is single-tenant — the gateway injects X-Scope-OrgID).
+  gateway:
+    enabledNonEnterprise: true
+    replicas: 2
+    nginx:
+      resources:
+        requests: { cpu: "100m", memory: "128Mi" }
+        limits:   { memory: "256Mi" }
+
+  # Distributed components — conservative baselines (prod overlay raises them).
+  distributor:
+    replicas: 2
+    resources:
+      requests: { cpu: "500m", memory: "512Mi" }
+      limits:   { memory: "1Gi" }
+  ingester:
+    replicas: 3                 # RF=3 needs >=3 ingesters
+    zoneAwareReplication:
+      enabled: false            # enable in prod overlay for multi-AZ
+    persistentVolume:
+      size: 10Gi
+    resources:
+      requests: { cpu: "500m", memory: "2Gi" }
+      limits:   { memory: "4Gi" }
+  querier:
+    replicas: 2
+    resources:
+      requests: { cpu: "500m", memory: "512Mi" }
+      limits:   { memory: "1Gi" }
+  query_frontend:
+    replicas: 2
+  query_scheduler:
+    replicas: 2
+  store_gateway:
+    replicas: 2
+    persistentVolume:
+      size: 10Gi
+  compactor:
+    replicas: 1
+    persistentVolume:
+      size: 10Gi
+  ruler:
+    replicas: 1
+  alertmanager:
+    enabled: false
+  overrides_exporter:
+    replicas: 1
+  rollout_operator:
+    enabled: true
+
+# =============================================================================
+# TEMPO — traces (distributed). OTLP in from the OTel Collector; optional
+# metrics-generator → Mimir for service graphs / span metrics.
+# https://grafana.github.io/helm-charts  (chart: tempo-distributed 1.61.3)
+# =============================================================================
+tempo:
+  enabled: true
+
+  # storage.trace.backend + provider block is supplied by the overlay.
+  storage:
+    trace:
+      backend: s3               # overridden per-backend
+      # block / wal paths default to chart values
+
+  # Compactor enforces trace retention (matches TEMPO_RETENTION dev = 7d).
+  compactor:
+    replicas: 1
+    config:
+      compaction:
+        block_retention: 168h   # 7 days
+    resources:
+      requests: { cpu: "500m", memory: "512Mi" }
+      limits:   { memory: "1Gi" }
+
+  distributor:
+    replicas: 2
+    config:
+      log_received_spans:
+        enabled: false
+    resources:
+      requests: { cpu: "500m", memory: "512Mi" }
+      limits:   { memory: "1Gi" }
+  ingester:
+    replicas: 3                 # RF=3
+    persistence:
+      enabled: true
+      size: 10Gi
+    resources:
+      requests: { cpu: "500m", memory: "1Gi" }
+      limits:   { memory: "2Gi" }
+  querier:
+    replicas: 2
+  queryFrontend:
+    replicas: 2
+
+  # OTLP receivers (gRPC :4317 / HTTP :4318) on the distributor.
+  traces:
+    otlp:
+      grpc:
+        enabled: true
+      http:
+        enabled: true
+
+  # metrics-generator → Mimir: service graphs + span metrics (mirrors dev tempo.yml).
+  metricsGenerator:
+    enabled: true
+    replicas: 1
+    config:
+      storage:
+        remote_write:
+          - url: http://obs-mimir-gateway.observability.svc.cluster.local/api/v1/push
+            send_exemplars: true
+        remote_write_add_org_id_header: true
+      registry:
+        external_labels:
+          source: tempo
+  # Turn the generators on for all tenants.
+  global_overrides:
+    defaults:
+      metrics_generator:
+        processors:
+          - service-graphs
+          - span-metrics
+
+  # Read/write entrypoint.
+  gateway:
+    enabled: true
+    replicas: 2
+
+  # Memcached front of the queriers/store (chart default on; keep modest).
+  memcached:
+    enabled: true
+
+# =============================================================================
+# GRAFANA — UI. HA: multiple replicas + EXTERNAL Postgres (no SQLite), datasources
+# provisioned to the Loki/Mimir/Tempo gateways, dashboards via sidecar.
+# https://grafana.github.io/helm-charts  (chart: grafana 10.5.15)
+# =============================================================================
+grafana:
+  enabled: true
+  replicas: 2
+
+  # ── HA database: external Postgres ──────────────────────────────────────────
+  # SQLite (chart default) cannot be shared across replicas. Point Grafana at a
+  # managed/external Postgres. Credentials come from a Secret you create
+  # (see helm/README.md → "Grafana database secret"); never inline them here.
+  grafana.ini:
+    database:
+      type: postgres
+      host: ${GF_DATABASE_HOST}        # e.g. postgres.observability.svc:5432 or RDS endpoint
+      name: ${GF_DATABASE_NAME}
+      user: ${GF_DATABASE_USER}
+      password: ${GF_DATABASE_PASSWORD}
+      ssl_mode: require
+    server:
+      root_url: "%(protocol)s://%(domain)s/"
+    # Unified alerting state also lives in Postgres → HA-safe.
+    unified_alerting:
+      enabled: true
+    auth.anonymous:
+      enabled: false
+
+  # Inject DB creds from a Secret into the templated grafana.ini above.
+  envValueFrom:
+    GF_DATABASE_HOST:
+      secretKeyRef: { name: grafana-db, key: host }
+    GF_DATABASE_NAME:
+      secretKeyRef: { name: grafana-db, key: database }
+    GF_DATABASE_USER:
+      secretKeyRef: { name: grafana-db, key: user }
+    GF_DATABASE_PASSWORD:
+      secretKeyRef: { name: grafana-db, key: password }
+
+  # Admin credentials from a Secret (not inline).
+  admin:
+    existingSecret: grafana-admin
+    userKey: admin-user
+    passwordKey: admin-password
+
+  # ── Datasources (correlated: logs↔traces↔metrics) — mirrors dev provisioning ─
+  datasources:
+    datasources.yaml:
+      apiVersion: 1
+      datasources:
+        - name: Mimir
+          type: prometheus
+          uid: prometheus            # keep uid 'prometheus' so dashboards/panels port over
+          access: proxy
+          url: http://obs-mimir-gateway.observability.svc.cluster.local/prometheus
+          isDefault: true
+          jsonData:
+            httpHeaderName1: X-Scope-OrgID
+          secureJsonData:
+            httpHeaderValue1: anonymous   # single-tenant org id injected by gateway
+        - name: Loki
+          type: loki
+          uid: loki
+          access: proxy
+          url: http://obs-loki-gateway.observability.svc.cluster.local
+          jsonData:
+            maxLines: 5000
+            derivedFields:
+              - name: TraceID
+                matcherRegex: 'trace_id["\s:=]+([\w-]+)'
+                url: '$${__value.raw}'
+                datasourceUid: tempo
+        - name: Tempo
+          type: tempo
+          uid: tempo
+          access: proxy
+          url: http://obs-tempo-gateway.observability.svc.cluster.local
+          jsonData:
+            tracesToLogsV2:
+              datasourceUid: loki
+              spanStartTimeShift: '-1h'
+              spanEndTimeShift: '1h'
+              tags:
+                - { key: 'service.name', value: 'service' }
+              filterByTraceID: true
+              filterBySpanID: false
+            tracesToMetrics:
+              datasourceUid: prometheus
+            serviceMap:
+              datasourceUid: prometheus
+            nodeGraph:
+              enabled: true
+
+  # ── Dashboards via sidecar (drop ConfigMaps labelled grafana_dashboard=1) ────
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      folderAnnotation: grafana_folder
+      provider:
+        foldersFromFilesStructure: true
+    datasources:
+      enabled: false   # we provision datasources inline above
+
+  # HA hygiene.
+  podDisruptionBudget:
+    maxUnavailable: 1
+  resources:
+    requests: { cpu: "200m", memory: "256Mi" }
+    limits:   { memory: "512Mi" }
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: grafana
+            topologyKey: kubernetes.io/hostname
+
+# =============================================================================
+# OPENTELEMETRY COLLECTOR — ingest gateway (Deployment + HPA). The SINGLE OTLP
+# endpoint apps know about; fans out OTLP → Loki (logs), Mimir (metrics via PRW),
+# Tempo (traces). Mirrors config/otel-collector/config.yaml.
+# https://open-telemetry.github.io/opentelemetry-helm-charts (chart 0.158.2)
+# =============================================================================
+otelCollector:
+  enabled: true
+  mode: deployment               # gateway, not DaemonSet
+  replicaCount: 2
+
+  image:
+    repository: otel/opentelemetry-collector-contrib   # contrib: has prometheusremotewrite + loki exporters
+
+  # Expose OTLP ports.
+  ports:
+    otlp:
+      enabled: true
+      containerPort: 4317
+      servicePort: 4317
+      protocol: TCP
+    otlp-http:
+      enabled: true
+      containerPort: 4318
+      servicePort: 4318
+      protocol: TCP
+
+  resources:
+    requests: { cpu: "200m", memory: "256Mi" }
+    limits:   { memory: "1Gi" }
+
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+  # Horizontal autoscaling on CPU (chart-native HPA).
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+
+  # The collector pipeline config (replaces the chart's default config wholesale).
+  config:
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+    processors:
+      memory_limiter:
+        check_interval: 5s
+        limit_percentage: 80
+        spike_limit_percentage: 25
+      batch:
+        send_batch_size: 1024
+        timeout: 5s
+      resource:
+        attributes:
+          - key: deployment.environment
+            value: ${env:DEPLOYMENT_ENV}
+            action: insert
+    exporters:
+      # --- Anti-log-loss reliability anchors (applied to every backend exporter) ---
+      # retry_on_failure: absorbs backend 429 (rate-limit) / 5xx spikes with backoff
+      #   instead of dropping — this is the #1 loss point under overload.
+      # sending_queue: in-memory spool that rides out short bursts; num_consumers
+      #   sets export parallelism. For durability ACROSS a collector restart, add the
+      #   file_storage extension backed by a PVC (StatefulSet/agent tier) or put Kafka
+      #   in front — see docs/SCALING.md "Durability ladder".
+      # Logs → Loki (native OTLP HTTP push to the Loki gateway).
+      otlphttp/loki:
+        endpoint: http://obs-loki-gateway.observability.svc.cluster.local/otlp
+        tls:
+          insecure: true
+        retry_on_failure:
+          enabled: true
+          initial_interval: 5s
+          max_interval: 30s
+          max_elapsed_time: 300s
+        sending_queue:
+          enabled: true
+          num_consumers: 10
+          queue_size: 10000
+      # Traces → Tempo distributor (OTLP gRPC).
+      otlp/tempo:
+        endpoint: obs-tempo-distributor.observability.svc.cluster.local:4317
+        tls:
+          insecure: true
+        retry_on_failure:
+          enabled: true
+          initial_interval: 5s
+          max_interval: 30s
+          max_elapsed_time: 300s
+        sending_queue:
+          enabled: true
+          num_consumers: 10
+          queue_size: 10000
+      # Metrics → Mimir via Prometheus remote-write (gateway distributor path).
+      prometheusremotewrite:
+        endpoint: http://obs-mimir-gateway.observability.svc.cluster.local/api/v1/push
+        headers:
+          X-Scope-OrgID: anonymous
+        tls:
+          insecure: true
+        retry_on_failure:
+          enabled: true
+          initial_interval: 5s
+          max_interval: 30s
+          max_elapsed_time: 300s
+        # prometheusremotewrite uses an internal WAL-less queue; keep it bounded.
+        remote_write_queue:
+          enabled: true
+          queue_size: 10000
+          num_consumers: 5
+      debug:
+        verbosity: basic
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
+    service:
+      extensions: [health_check]
+      telemetry:
+        metrics:
+          address: 0.0.0.0:8888
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, resource, batch]
+          exporters: [otlp/tempo]
+        metrics:
+          receivers: [otlp]
+          processors: [memory_limiter, resource, batch]
+          exporters: [prometheusremotewrite]
+        logs:
+          receivers: [otlp]
+          processors: [memory_limiter, resource, batch]
+          exporters: [otlphttp/loki]
+
+  extraEnvs:
+    - name: DEPLOYMENT_ENV
+      value: production

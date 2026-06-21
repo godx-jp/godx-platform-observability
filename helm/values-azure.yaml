@@ -1,0 +1,74 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Object-storage overlay: Azure Blob Storage. Layer AFTER values.yaml.
+#
+#   helm upgrade --install obs ./helm -n observability \
+#     -f helm/values.yaml -f helm/values-azure.yaml [-f helm/values-production.yaml]
+#
+# Auth (RECOMMENDED): AKS Workload Identity / Managed Identity — set
+# useManagedIdentity/useFederatedToken and leave account_key blank.
+# Alternative: account key from a Secret referenced via env (never inline).
+#
+# "Buckets" = Blob containers; pre-create one per signal.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# =============================================================================
+# LOKI
+# =============================================================================
+loki:
+  loki:
+    storage:
+      type: azure
+      bucketNames:
+        chunks: obs-loki-chunks       # CHANGE-ME (container name)
+        ruler: obs-loki-ruler         # CHANGE-ME
+        admin: obs-loki-admin         # CHANGE-ME
+      azure:
+        accountName: obsstorageacct   # CHANGE-ME (storage account)
+        useManagedIdentity: true      # RECOMMENDED; leave accountKey unset
+        # userAssignedId: "<client-id>"   # if using a user-assigned identity
+        # accountKey: ""                  # only if NOT using managed identity (prefer Secret env)
+    schemaConfig:
+      configs:
+        - from: "2024-01-01"
+          store: tsdb
+          object_store: azure
+          schema: v13
+          index:
+            prefix: index_
+            period: 24h
+    compactor:
+      delete_request_store: azure
+
+# =============================================================================
+# MIMIR
+# =============================================================================
+mimir:
+  mimir:
+    structuredConfig:
+      common:
+        storage:
+          backend: azure
+          azure:
+            account_name: obsstorageacct        # CHANGE-ME
+            # account_key: ${AZURE_STORAGE_KEY} # via env from Secret, OR use workload identity:
+            # The Mimir Azure client honors workload identity when account_key is empty.
+      blocks_storage:
+        azure:
+          container_name: obs-mimir-blocks      # CHANGE-ME
+      ruler_storage:
+        azure:
+          container_name: obs-mimir-ruler       # CHANGE-ME
+  # Workload identity: label the pods and annotate the SA (see Azure docs).
+
+# =============================================================================
+# TEMPO
+# =============================================================================
+tempo:
+  storage:
+    trace:
+      backend: azure
+      azure:
+        container_name: obs-tempo-traces        # CHANGE-ME (container)
+        storage_account_name: obsstorageacct    # CHANGE-ME
+        use_federated_token: true               # AKS workload identity; OR set storage_account_key via env
+        # storage_account_key: ${AZURE_STORAGE_KEY}

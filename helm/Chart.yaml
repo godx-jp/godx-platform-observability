@@ -1,0 +1,75 @@
+apiVersion: v2
+name: godx-platform-observability
+description: >-
+  Production-grade, horizontally scalable, vendor-neutral observability plane
+  (logs + metrics + traces) built on the Grafana LGTM stack + OpenTelemetry.
+  An umbrella chart that wires upstream charts together as values overlays —
+  no forks. Loki (scalable) + Mimir (distributed) + Tempo (distributed) +
+  Grafana (HA, external Postgres) + OpenTelemetry Collector (gateway + HPA).
+type: application
+
+# Chart version is independent of the bundled apps; bump on overlay changes.
+version: 1.0.0
+
+# appVersion tracks the godx-platform-observability product release this
+# overlay set targets (see ../VERSION / ../CHANGELOG.md).
+appVersion: "1.0.0"
+
+home: https://github.com/godx-jp/godx-platform-observability
+sources:
+  - https://github.com/godx-jp/godx-platform-observability
+keywords:
+  - observability
+  - opentelemetry
+  - grafana
+  - loki
+  - mimir
+  - tempo
+  - logs
+  - metrics
+  - traces
+maintainers:
+  - name: godx
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Upstream chart dependencies — VERSION PINNED. No forks: each component is the
+# unmodified upstream chart, configured purely through values (see values.yaml
+# and values-*.yaml overlays). Verified against the live chart repo indexes on
+# 2026-06-21.
+#
+#   grafana repo : https://grafana.github.io/helm-charts
+#   otel   repo  : https://open-telemetry.github.io/opentelemetry-helm-charts
+#
+# Toggle any component off with `<alias>.enabled: false` (the `condition` keys
+# below). Each dependency is namespaced under its alias in values.yaml.
+# ─────────────────────────────────────────────────────────────────────────────
+dependencies:
+  - name: loki
+    alias: loki
+    version: 6.55.0            # appVersion 3.6.7 — Loki SimpleScalable/distributed
+    repository: https://grafana.github.io/helm-charts
+    condition: loki.enabled
+
+  - name: mimir-distributed
+    alias: mimir
+    version: 6.0.6             # appVersion 3.0.4 — metrics backend (replaces single Prometheus)
+    repository: https://grafana.github.io/helm-charts
+    condition: mimir.enabled
+
+  - name: tempo-distributed
+    alias: tempo
+    version: 1.61.3            # appVersion 2.9.0 — distributed traces backend
+    repository: https://grafana.github.io/helm-charts
+    condition: tempo.enabled
+
+  - name: grafana
+    alias: grafana
+    version: 10.5.15           # appVersion 12.3.1 — UI (HA, external Postgres)
+    repository: https://grafana.github.io/helm-charts
+    condition: grafana.enabled
+
+  - name: opentelemetry-collector
+    alias: otelCollector
+    version: 0.158.2           # appVersion 0.153.0 — ingest gateway (Deployment + HPA)
+    repository: https://open-telemetry.github.io/opentelemetry-helm-charts
+    condition: otelCollector.enabled

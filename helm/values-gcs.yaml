@@ -1,0 +1,80 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Object-storage overlay: Google Cloud Storage (GCS). Layer AFTER values.yaml.
+#
+#   helm upgrade --install obs ./helm -n observability \
+#     -f helm/values.yaml -f helm/values-gcs.yaml [-f helm/values-production.yaml]
+#
+# Auth (RECOMMENDED): GKE Workload Identity — bind the component's KSA to a GSA
+# with objectAdmin on the buckets; leave service-account JSON blank.
+# Alternative: mount a Secret holding a service-account JSON key and point the
+# GOOGLE_APPLICATION_CREDENTIALS env at it (see helm/README.md). Never inline JSON.
+#
+# Buckets must be pre-created (one per signal).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# =============================================================================
+# LOKI
+# =============================================================================
+loki:
+  loki:
+    storage:
+      type: gcs
+      bucketNames:
+        chunks: obs-loki-chunks       # CHANGE-ME
+        ruler: obs-loki-ruler         # CHANGE-ME
+        admin: obs-loki-admin         # CHANGE-ME
+      gcs:
+        chunkBufferSize: 0
+        requestTimeout: "0s"
+        enableHttp2: true
+    schemaConfig:
+      configs:
+        - from: "2024-01-01"
+          store: tsdb
+          object_store: gcs
+          schema: v13
+          index:
+            prefix: index_
+            period: 24h
+    compactor:
+      delete_request_store: gcs
+  # Workload Identity: annotate the Loki SA. With a release named "obs" the
+  # SA is "obs-loki". Bind it to your GSA:
+  serviceAccount:
+    annotations:
+      iam.gke.io/gcp-service-account: obs-loki@PROJECT_ID.iam.gserviceaccount.com  # CHANGE-ME
+
+# =============================================================================
+# MIMIR
+# =============================================================================
+mimir:
+  mimir:
+    structuredConfig:
+      common:
+        storage:
+          backend: gcs
+          gcs:
+            bucket_name: obs-mimir-blocks    # CHANGE-ME
+      blocks_storage:
+        gcs:
+          bucket_name: obs-mimir-blocks      # CHANGE-ME
+      ruler_storage:
+        gcs:
+          bucket_name: obs-mimir-ruler       # CHANGE-ME
+  # Workload Identity for all components' service account:
+  serviceAccount:
+    annotations:
+      iam.gke.io/gcp-service-account: obs-mimir@PROJECT_ID.iam.gserviceaccount.com  # CHANGE-ME
+
+# =============================================================================
+# TEMPO
+# =============================================================================
+tempo:
+  storage:
+    trace:
+      backend: gcs
+      gcs:
+        bucket_name: obs-tempo-traces        # CHANGE-ME
+  serviceAccount:
+    annotations:
+      iam.gke.io/gcp-service-account: obs-tempo@PROJECT_ID.iam.gserviceaccount.com  # CHANGE-ME

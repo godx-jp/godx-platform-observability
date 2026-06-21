@@ -1,0 +1,24 @@
+{{- /*
+Ship the repo's JSON dashboards to Grafana via the sidecar. Every file under
+helm/dashboards/*.json becomes a ConfigMap labelled grafana_dashboard=1, which
+the Grafana chart's dashboard sidecar (enabled in values.yaml) auto-imports.
+Disable by setting grafana.sidecar.dashboards.enabled=false.
+*/ -}}
+{{- if and .Values.grafana.enabled .Values.grafana.sidecar.dashboards.enabled }}
+{{- range $path, $bytes := .Files.Glob "dashboards/*.json" }}
+{{- $name := base $path | trimSuffix ".json" }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $.Release.Name }}-dashboard-{{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{ $.Values.grafana.sidecar.dashboards.label }}: {{ $.Values.grafana.sidecar.dashboards.labelValue | quote }}
+  annotations:
+    grafana_folder: "Observability"
+data:
+  {{ $name }}.json: |-
+{{ $.Files.Get $path | indent 4 }}
+{{- end }}
+{{- end }}

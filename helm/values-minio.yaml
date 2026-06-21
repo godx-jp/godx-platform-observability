@@ -1,0 +1,129 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Object-storage overlay: self-hosted MinIO (S3-compatible, in-cluster).
+# Fully cloud-agnostic / air-gapped option. Layer AFTER values.yaml.
+#
+#   helm upgrade --install obs ./helm -n observability \
+#     -f helm/values.yaml -f helm/values-minio.yaml [-f helm/values-production.yaml]
+#
+# This re-enables a HA MinIO StatefulSet (the Loki chart bundles one) and points
+# Loki + Mimir + Tempo at it over the S3 protocol. MinIO root credentials come
+# from a Secret you create:
+#
+#   kubectl -n observability create secret generic minio-root \
+#     --from-literal=rootUser=obsadmin \
+#     --from-literal=rootPassword="$(openssl rand -base64 24)"
+#
+# For real production at scale, prefer a managed object store (S3/GCS/Azure) or a
+# dedicated standalone MinIO cluster sized for your throughput. This overlay is
+# ideal for on-prem / sovereign / dev-prod-parity deployments.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Shared endpoint (the bundled MinIO service, release "obs"):
+#   http://obs-minio.observability.svc.cluster.local:9000
+
+# =============================================================================
+# MINIO — bundled by the Loki chart; create the buckets all three signals need.
+# =============================================================================
+loki:
+  minio:
+    enabled: true
+    mode: distributed
+    replicas: 4
+    drivesPerNode: 1
+    # Root creds from Secret (do NOT inline). The chart supports existingSecret:
+    existingSecret: minio-root
+    persistence:
+      enabled: true
+      size: 50Gi
+    buckets:
+      - name: obs-loki-chunks
+        policy: none
+      - name: obs-loki-ruler
+        policy: none
+      - name: obs-loki-admin
+        policy: none
+      - name: obs-mimir-blocks
+        policy: none
+      - name: obs-mimir-ruler
+        policy: none
+      - name: obs-tempo-traces
+        policy: none
+    resources:
+      requests: { cpu: "250m", memory: "512Mi" }
+
+  # Point Loki at the bundled MinIO over S3.
+  loki:
+    storage:
+      type: s3
+      bucketNames:
+        chunks: obs-loki-chunks
+        ruler: obs-loki-ruler
+        admin: obs-loki-admin
+      s3:
+        endpoint: http://obs-minio.observability.svc.cluster.local:9000
+        region: us-east-1
+        s3ForcePathStyle: true
+        insecure: true
+        # Credentials injected from Secret via env (see extraEnvFrom below).
+    schemaConfig:
+      configs:
+        - from: "2024-01-01"
+          store: tsdb
+          object_store: s3
+          schema: v13
+          index:
+            prefix: index_
+            period: 24h
+    compactor:
+      delete_request_store: s3
+  # MinIO access keys for Loki read/write/backend (Secret `minio-s3` with keys
+  # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY mapped to the MinIO root creds):
+  write:   { extraEnvFrom: &minioEnv [{ secretRef: { name: minio-s3 } }] }
+  read:    { extraEnvFrom: *minioEnv }
+  backend: { extraEnvFrom: *minioEnv }
+
+# =============================================================================
+# MIMIR → bundled MinIO over S3.
+# =============================================================================
+mimir:
+  mimir:
+    structuredConfig:
+      common:
+        storage:
+          backend: s3
+          s3:
+            endpoint: obs-minio.observability.svc.cluster.local:9000
+            insecure: true
+            bucket_name: obs-mimir-blocks
+            access_key_id: ${AWS_ACCESS_KEY_ID}
+            secret_access_key: ${AWS_SECRET_ACCESS_KEY}
+      blocks_storage:
+        s3:
+          bucket_name: obs-mimir-blocks
+      ruler_storage:
+        s3:
+          bucket_name: obs-mimir-ruler
+  global:
+    extraEnvFrom:
+      - secretRef: { name: minio-s3 }
+
+# =============================================================================
+# TEMPO → bundled MinIO over S3.
+# =============================================================================
+tempo:
+  storage:
+    trace:
+      backend: s3
+      s3:
+        bucket: obs-tempo-traces
+        endpoint: obs-minio.observability.svc.cluster.local:9000
+        insecure: true
+        access_key: ${S3_ACCESS_KEY}
+        secret_key: ${S3_SECRET_KEY}
+  # Map MinIO creds (Secret `minio-s3-tempo` with keys S3_ACCESS_KEY/S3_SECRET_KEY)
+  # onto every component that touches storage:
+  distributor: { extraEnvFrom: &tEnv [{ secretRef: { name: minio-s3-tempo } }] }
+  ingester:    { extraEnvFrom: *tEnv }
+  compactor:   { extraEnvFrom: *tEnv }
+  querier:     { extraEnvFrom: *tEnv }
+  metricsGenerator: { extraEnvFrom: *tEnv }

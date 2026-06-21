@@ -32,7 +32,7 @@ datasources:
         spanStartTimeShift: '-1h'
         spanEndTimeShift: '1h'
         tags:
-          - { key: 'service.name', value: 'service' }
+          - {key: 'service.name', value: 'service'}
         filterByTraceID: true
         filterBySpanID: false
       tracesToMetrics:
